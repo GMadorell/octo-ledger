@@ -11,6 +11,20 @@ pub struct TxId(u32);
 #[nutype(derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq))]
 pub struct Amount(Decimal);
 
+impl std::ops::Add for Amount {
+    type Output = Amount;
+    fn add(self, rhs: Amount) -> Amount {
+        Amount::new(self.into_inner() + rhs.into_inner())
+    }
+}
+
+impl std::ops::Sub for Amount {
+    type Output = Amount;
+    fn sub(self, rhs: Amount) -> Amount {
+        Amount::new(self.into_inner() - rhs.into_inner())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TxType {
@@ -19,6 +33,20 @@ pub enum TxType {
     Dispute,
     Resolve,
     Chargeback,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisputeState {
+    NeverDisputed,
+    Disputed,
+    Settled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepositRecord {
+    pub client: ClientId,
+    pub amount: Amount,
+    pub state: DisputeState,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -77,5 +105,9 @@ impl Ledger {
         self.accounts
             .entry(client)
             .or_insert_with(|| Account::new(client))
+    }
+
+    pub fn get_mut(&mut self, client: ClientId) -> Option<&mut Account> {
+        self.accounts.get_mut(&client)
     }
 }

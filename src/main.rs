@@ -4,6 +4,7 @@ mod model;
 mod parser;
 mod printer;
 mod reader;
+mod store;
 
 use clap::Parser;
 use error::ReaderError;

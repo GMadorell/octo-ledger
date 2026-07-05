@@ -4,10 +4,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ParseError {
-    #[error("invalid amount {0:?}")]
-    Amount(String),
-    #[error("unknown transaction type {0:?}")]
-    TransactionType(String),
     #[error("missing amount for {0:?} transaction")]
     MissingAmount(TxType),
 }
