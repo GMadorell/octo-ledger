@@ -88,49 +88,6 @@ client,available,held,total,locked
   because the client has no account yet or because `available` is
   insufficient. No phantom accounts are created for unknown clients.
 
-## Architecture
-
-Processing is split into a small pipeline of independently-testable layers,
-each living in its own file under `src/`:
-
-- **`reader.rs`** — streams the input file with `csv::Reader`, deserializing
-  one record at a time and tracking row numbers for error messages.
-- **`parser.rs`** — pure validation: converts a raw, untrusted CSV row into
-  the validated `Entry` domain type (enforces the amount-presence rule).
-- **`store.rs`** — the `DepositStore` trait, keyed by `tx` id and storing
-  each deposit's `client`/`amount`/dispute-state, used by `engine.rs` to
-  process `dispute`/`resolve`/`chargeback` rows. Two implementations:
-  `InMemoryDepositStore` (a `HashMap`, test-only, `#[cfg(test)]`) and
-  `LiveDepositStore`, the production implementation, backed by `redb` (a
-  pure-Rust embedded B-tree) in an ephemeral `tempfile::TempDir` that's
-  deleted on drop. Every write transaction uses `Durability::None` (no
-  per-commit fsync), which is safe here because the process never re-reads
-  its own data after exit — this is a run-once tool, not a persistent store.
-- **`ledger.rs`** — the `LedgerStore` trait (`get`/`upsert`/
-  `for_each_account`) plus its sole implementation, `InMemoryLedger`, a
-  `HashMap` of per-client running balances. Since `client` is a `u16`, an
-  in-memory ledger is capped at ≤65,536 accounts — a few MB at most — so it
-  can't grow unbounded the way the deposit index can.
-- **`engine.rs`** — lazily folds the stream of validated `Entry` values into
-  a caller-supplied `LedgerStore`, generic over both store traits
-  (`run_with_stores<D: DepositStore, L: LedgerStore>`), consulting the
-  `DepositStore` to resolve dispute/resolve/chargeback rows against the
-  deposit they reference and reading/writing balances through the
-  `LedgerStore`.
-- **`printer.rs`** — serializes a `LedgerStore` to CSV.
-- **`main.rs`** — the CLI entry point (via `clap`); wires `LiveDepositStore`
-  (disk-backed deposits) and `InMemoryLedger` (in-memory balances) into
-  `engine::run_with_stores`, bridges the reader's fallible per-row stream
-  into the engine's plain `Entry` stream without collecting into a `Vec`,
-  and prints error chains (`error: ...` / `  caused by: ...`) on failure —
-  including failure to initialize the deposit store itself.
-
-Validation errors (`ParseError`) and top-level errors (`ReaderError`, which
-also wraps I/O/CSV failures, parse errors, and deposit-store initialization
-failures) are kept in separate types (`src/error.rs`), both via `thiserror`,
-so the failure reason stays precise and each error's `#[source]` chain
-prints cleanly.
-
 ## Development
 
 ```sh
@@ -140,13 +97,8 @@ cargo test    # unit tests (reader, parser, store, engine, printer) + integratio
 ```
 
 Integration tests (`tests/integration_test.rs`) drive the compiled binary as
-a subprocess against the fixtures in `examples/` (`happy_path.csv`,
-`malformed.csv`, `dispute.csv`, `resolve.csv`, `chargeback.csv`, and
-`edge_cases.csv`), since this crate has no `lib.rs` and its internal modules
-aren't reachable from outside the binary. `examples/large.csv` is a
-human-readable sample only, distinct from the ~50k-row CSV that
-`cargo test`'s scale test generates on the fly to exercise the streaming
-path at scale.
+a subprocess against the fixtures in `examples/`, since this crate has no `lib.rs` and its internal modules
+aren't reachable from outside the binary.
 
 The compiled binary always uses `LiveDepositStore` + `InMemoryLedger` in
 production, so integration tests (including the scale test), which drive
@@ -155,7 +107,7 @@ Unit tests, by contrast, mostly use the in-memory `InMemoryDepositStore` for
 speed and to keep the store swappable behind its trait — `store.rs` also has
 tests that run the same shared contract against `LiveDepositStore` directly.
 
-## Known limitations / future work
+## Primary vs secondary memory considerations
 
 - **Deposits are retained on disk, not in memory.** `dispute`/`resolve`/
   `chargeback` require looking up a deposit's amount and dispute state by
