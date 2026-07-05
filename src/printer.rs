@@ -1,6 +1,9 @@
-use crate::model::Ledger;
+use crate::ledger::LedgerStore;
 
-pub fn write_ledger<W: std::io::Write>(ledger: &Ledger, writer: W) -> Result<(), csv::Error> {
+pub fn write_ledger<L: LedgerStore, W: std::io::Write>(
+    ledger: &L,
+    writer: W,
+) -> Result<(), csv::Error> {
     // has_headers(false) + a manual write_record ensures the header is
     // written even with zero accounts (serde's auto header only writes on
     // the first serialize() call).

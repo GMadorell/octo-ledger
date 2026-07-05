@@ -1,5 +1,6 @@
 mod engine;
 mod error;
+mod ledger;
 mod model;
 mod parser;
 mod printer;
@@ -8,10 +9,12 @@ mod store;
 
 use clap::Parser;
 use error::ReaderError;
+use ledger::InMemoryLedger;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::rc::Rc;
+use store::LiveDepositStore;
 
 #[derive(Parser)]
 struct Cli {
@@ -36,6 +39,9 @@ fn main() -> ExitCode {
 fn run() -> Result<(), ReaderError> {
     let cli = Cli::parse();
 
+    let deposits = LiveDepositStore::new()?;
+    let ledger_store = InMemoryLedger::default();
+
     let entries = reader::read_entries(&cli.input)?;
 
     // Bridges reader's Result<Entry, _> stream into engine's Entry stream
@@ -52,7 +58,7 @@ fn run() -> Result<(), ReaderError> {
         None => None,
     });
 
-    let ledger = engine::run(bridged);
+    let ledger = engine::run_with_stores(bridged, deposits, ledger_store);
 
     if let Some(err) = first_error.borrow_mut().take() {
         return Err(err);

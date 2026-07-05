@@ -1,4 +1,5 @@
 use crate::model::TxType;
+use crate::store::LiveDepositStoreError;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -26,4 +27,6 @@ pub enum ReaderError {
     },
     #[error("could not write output")]
     Write(#[source] csv::Error),
+    #[error("failed to initialize deposit store")]
+    Store(#[from] LiveDepositStoreError),
 }

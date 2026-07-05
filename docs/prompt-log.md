@@ -229,4 +229,35 @@ The idea is to run this prompt using a sonnet 5 driver with sonnet 5 subagents a
 # Prompt 6 explanation
 As this set of changes was getting a bit more complex, I ran the /simplify skill incorporated into Claude, which spawns subagents to review the code from different angles.
 
-After that, the idea is to do a manual crit review of the code to ensure we are good to go.
+After that, the idea is to do a manual crit review of the code to ensure we are good to go and commit the second step.
+
+# Prompt 7
+We have implemented all transaction types on this repository.
+What's missing, though, is handling really big files.
+We have two data structures that are currently in memory, the service to store the deposits and the ledger.
+Those two can grow larger than primary memory, we should fix that.
+Devise a plan to use disk based operations behind a trait for both of them. Both of them should have in memory versions and "Live" versions. Live versions are used on production path. In memory for minor tests. Live versions for integrations tests.
+Make sure we have specific unit tests that test the Live versions for correctness.
+We don't need a full blow database with persistence here, as the requirements are that the project will run once, output to stdout and then die.
+We just need to persist the results so that primary memory is never too full to crash the program. You can assume that secondary memory is fine (disk).
+
+Devise a plan following these constraints. Feel free to take a look at existing plans for more information and the readme for more context.
+
+Also make sure the plan is split into small steps as much as possible. Put as part of the plan that tests should be green, code should be correctly formatted, and correctness checks should be check, running a new subagent for clean review, as part of how to execute it.
+
+# Prompt 7 explanation
+As the last step, to handle arbitrarily large files with the assumption that they are bigger than primary memory but data can fit in secondary memory, we want to implement a solution so that we can persist them to disk (following the results of the investigation on older plans).
+
+The idea is to run the prompt with a Opus 4.8 agent, do the plan and execute it later with a Sonnet 5 agent.
+
+# Prompt 8
+Execute the plan on `docs/plans/octo-ledger-disk-backed-stores-plan.md`, use sonnet subagents as much as possible for subtasks, sequentially.
+
+Open crit for a review of the changes after we are done, don't commit, I will commit myself or ask you to if I think the changes are good enough.
+
+# Prompt 8 explanation
+As the plan is already detailed enough, we don't need a lot of attention to the prompt here. The structure is already laid out correctly so the model already knew what structure to work with.
+
+The idea is to run the prompt with a Sonnet 5 driving agent and review the results later with Crit before commiting.
+
+At this point we are "done" (what sw project is ever fully finished?), so the plan is to do a last manual review of the readme and ship it.

@@ -1,6 +1,5 @@
 use nutype::nutype;
 use rust_decimal::Decimal;
-use std::collections::HashMap;
 
 #[nutype(derive(Serialize, Deserialize, Copy, Clone, Debug, PartialEq, Eq, Hash))]
 pub struct ClientId(u16);
@@ -84,30 +83,5 @@ impl Account {
             total: Amount::new(Decimal::ZERO),
             locked: false,
         }
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Ledger {
-    accounts: HashMap<ClientId, Account>,
-}
-
-impl Ledger {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn accounts(&self) -> impl Iterator<Item = &Account> {
-        self.accounts.values()
-    }
-
-    pub fn entry(&mut self, client: ClientId) -> &mut Account {
-        self.accounts
-            .entry(client)
-            .or_insert_with(|| Account::new(client))
-    }
-
-    pub fn get_mut(&mut self, client: ClientId) -> Option<&mut Account> {
-        self.accounts.get_mut(&client)
     }
 }

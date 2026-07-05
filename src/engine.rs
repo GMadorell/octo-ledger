@@ -1,28 +1,40 @@
-use crate::model::{Account, DepositRecord, DisputeState, Entry, Ledger, TxType};
-use crate::store::{DepositStore, InMemoryDepositStore};
+#[cfg(test)]
+use crate::ledger::InMemoryLedger;
+use crate::ledger::LedgerStore;
+use crate::model::{Account, DepositRecord, DisputeState, Entry, TxType};
+use crate::store::DepositStore;
+#[cfg(test)]
+use crate::store::InMemoryDepositStore;
 
-pub fn run(entries: impl Iterator<Item = Entry>) -> Ledger {
-    run_with_store(entries, InMemoryDepositStore::default())
+#[cfg(test)]
+pub fn run(entries: impl Iterator<Item = Entry>) -> InMemoryLedger {
+    run_with_stores(
+        entries,
+        InMemoryDepositStore::default(),
+        InMemoryLedger::default(),
+    )
 }
 
-pub fn run_with_store<S: DepositStore>(
+pub fn run_with_stores<D: DepositStore, L: LedgerStore>(
     entries: impl Iterator<Item = Entry>,
-    mut store: S,
-) -> Ledger {
-    let mut ledger = Ledger::new();
-
+    mut store: D,
+    mut ledger: L,
+) -> L {
     for entry in entries {
         match entry.tx_type {
             TxType::Deposit => {
                 let Some(amount) = entry.amount else {
                     continue;
                 };
-                let account = ledger.entry(entry.client);
+                let mut account = ledger
+                    .get(entry.client)
+                    .unwrap_or_else(|| Account::new(entry.client));
                 if account.locked {
                     continue;
                 }
                 account.available = account.available + amount;
                 account.total = account.total + amount;
+                ledger.upsert(entry.client, account);
                 store.insert(
                     entry.tx,
                     DepositRecord {
@@ -36,7 +48,7 @@ pub fn run_with_store<S: DepositStore>(
                 let Some(amount) = entry.amount else {
                     continue;
                 };
-                let Some(account) = ledger.get_mut(entry.client) else {
+                let Some(mut account) = ledger.get(entry.client) else {
                     continue;
                 };
                 if account.locked || account.available.into_inner() < amount.into_inner() {
@@ -44,14 +56,12 @@ pub fn run_with_store<S: DepositStore>(
                 }
                 account.available = account.available - amount;
                 account.total = account.total - amount;
+                ledger.upsert(entry.client, account);
             }
             TxType::Dispute => {
-                let Some((record, account)) = validate_dispute_target(
-                    &mut ledger,
-                    &store,
-                    &entry,
-                    DisputeState::NeverDisputed,
-                ) else {
+                let Some((record, mut account)) =
+                    validate_dispute_target(&ledger, &store, &entry, DisputeState::NeverDisputed)
+                else {
                     continue;
                 };
                 if account.available.into_inner() < record.amount.into_inner() {
@@ -60,20 +70,22 @@ pub fn run_with_store<S: DepositStore>(
                 account.available = account.available - record.amount;
                 account.held = account.held + record.amount;
                 store.set_state(entry.tx, DisputeState::Disputed);
+                ledger.upsert(record.client, account);
             }
             TxType::Resolve => {
-                let Some((record, account)) =
-                    validate_dispute_target(&mut ledger, &store, &entry, DisputeState::Disputed)
+                let Some((record, mut account)) =
+                    validate_dispute_target(&ledger, &store, &entry, DisputeState::Disputed)
                 else {
                     continue;
                 };
                 account.available = account.available + record.amount;
                 account.held = account.held - record.amount;
                 store.set_state(entry.tx, DisputeState::Settled);
+                ledger.upsert(record.client, account);
             }
             TxType::Chargeback => {
-                let Some((record, account)) =
-                    validate_dispute_target(&mut ledger, &store, &entry, DisputeState::Disputed)
+                let Some((record, mut account)) =
+                    validate_dispute_target(&ledger, &store, &entry, DisputeState::Disputed)
                 else {
                     continue;
                 };
@@ -81,6 +93,7 @@ pub fn run_with_store<S: DepositStore>(
                 account.total = account.total - record.amount;
                 store.set_state(entry.tx, DisputeState::Settled);
                 account.locked = true;
+                ledger.upsert(record.client, account);
             }
         }
     }
@@ -88,17 +101,19 @@ pub fn run_with_store<S: DepositStore>(
     ledger
 }
 
-fn validate_dispute_target<'a, S: DepositStore>(
-    ledger: &'a mut Ledger,
+fn validate_dispute_target<S: DepositStore, L: LedgerStore>(
+    ledger: &L,
     store: &S,
     entry: &Entry,
     expected_state: DisputeState,
-) -> Option<(DepositRecord, &'a mut Account)> {
+) -> Option<(DepositRecord, Account)> {
     let record = store.get(entry.tx)?;
     if record.client != entry.client {
         return None;
     }
-    let account = ledger.entry(record.client);
+    let account = ledger
+        .get(record.client)
+        .unwrap_or_else(|| Account::new(record.client));
     if account.locked || record.state != expected_state {
         return None;
     }
@@ -110,6 +125,10 @@ mod tests {
     use super::*;
     use crate::model::{Amount, ClientId, TxId};
     use rust_decimal::Decimal;
+
+    fn all_accounts(ledger: &InMemoryLedger) -> Vec<crate::model::Account> {
+        ledger.accounts().cloned().collect()
+    }
 
     fn deposit(client: u16, tx: u32, amount: &str) -> Entry {
         Entry {
@@ -160,11 +179,10 @@ mod tests {
         Amount::new(s.parse::<Decimal>().unwrap())
     }
 
-    fn account_for(ledger: &Ledger, client: u16) -> crate::model::Account {
-        ledger
-            .accounts()
+    fn account_for(ledger: &InMemoryLedger, client: u16) -> crate::model::Account {
+        all_accounts(ledger)
+            .into_iter()
             .find(|a| a.client == ClientId::new(client))
-            .cloned()
             .expect("account should exist")
     }
 
@@ -172,9 +190,9 @@ mod tests {
     fn single_deposit_produces_matching_available_and_total() {
         let ledger = run(vec![deposit(1, 1, "1.5")].into_iter());
 
-        let accounts: Vec<_> = ledger.accounts().collect();
+        let accounts = all_accounts(&ledger);
         assert_eq!(accounts.len(), 1);
-        let account = accounts[0];
+        let account = &accounts[0];
         assert_eq!(account.available, amt("1.5"));
         assert_eq!(account.total, amt("1.5"));
         assert_eq!(account.held, amt("0"));
@@ -185,9 +203,9 @@ mod tests {
     fn two_deposits_for_same_client_sum_correctly() {
         let ledger = run(vec![deposit(1, 1, "1.5"), deposit(1, 2, "2.25")].into_iter());
 
-        let accounts: Vec<_> = ledger.accounts().collect();
+        let accounts = all_accounts(&ledger);
         assert_eq!(accounts.len(), 1);
-        let account = accounts[0];
+        let account = &accounts[0];
         assert_eq!(account.available, amt("3.75"));
         assert_eq!(account.total, amt("3.75"));
     }
@@ -196,12 +214,13 @@ mod tests {
     fn deposits_across_two_clients_produce_independent_accounts() {
         let ledger = run(vec![deposit(1, 1, "1.0"), deposit(2, 2, "5.0")].into_iter());
 
-        let client1 = ledger
-            .accounts()
+        let accounts = all_accounts(&ledger);
+        let client1 = accounts
+            .iter()
             .find(|a| a.client == ClientId::new(1))
             .expect("client 1 account should exist");
-        let client2 = ledger
-            .accounts()
+        let client2 = accounts
+            .iter()
             .find(|a| a.client == ClientId::new(2))
             .expect("client 2 account should exist");
 
@@ -213,9 +232,9 @@ mod tests {
     fn deposit_followed_by_withdrawal_nets_out() {
         let ledger = run(vec![deposit(1, 1, "5.0"), withdrawal(1, 2, "1.5")].into_iter());
 
-        let accounts: Vec<_> = ledger.accounts().collect();
+        let accounts = all_accounts(&ledger);
         assert_eq!(accounts.len(), 1);
-        let account = accounts[0];
+        let account = &accounts[0];
         assert_eq!(account.available, amt("3.5"));
         assert_eq!(account.total, amt("3.5"));
         assert_eq!(account.held, amt("0"));
@@ -345,7 +364,7 @@ mod tests {
     fn withdrawal_against_unknown_client_creates_no_account() {
         let ledger = run(vec![withdrawal(1, 1, "5.0")].into_iter());
 
-        assert_eq!(ledger.accounts().count(), 0);
+        assert_eq!(all_accounts(&ledger).len(), 0);
     }
 
     #[test]

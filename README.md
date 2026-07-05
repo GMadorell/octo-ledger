@@ -97,23 +97,39 @@ each living in its own file under `src/`:
   one record at a time and tracking row numbers for error messages.
 - **`parser.rs`** — pure validation: converts a raw, untrusted CSV row into
   the validated `Entry` domain type (enforces the amount-presence rule).
-- **`store.rs`** — the `DepositStore` trait plus its `InMemoryDepositStore`
-  implementation: an in-memory lookup of prior deposits by `tx` id, keyed by
-  `client`/`amount`/dispute-state, used by `engine.rs` to process
-  `dispute`/`resolve`/`chargeback` rows.
+- **`store.rs`** — the `DepositStore` trait, keyed by `tx` id and storing
+  each deposit's `client`/`amount`/dispute-state, used by `engine.rs` to
+  process `dispute`/`resolve`/`chargeback` rows. Two implementations:
+  `InMemoryDepositStore` (a `HashMap`, test-only, `#[cfg(test)]`) and
+  `LiveDepositStore`, the production implementation, backed by `redb` (a
+  pure-Rust embedded B-tree) in an ephemeral `tempfile::TempDir` that's
+  deleted on drop. Every write transaction uses `Durability::None` (no
+  per-commit fsync), which is safe here because the process never re-reads
+  its own data after exit — this is a run-once tool, not a persistent store.
+- **`ledger.rs`** — the `LedgerStore` trait (`get`/`upsert`/
+  `for_each_account`) plus its sole implementation, `InMemoryLedger`, a
+  `HashMap` of per-client running balances. Since `client` is a `u16`, an
+  in-memory ledger is capped at ≤65,536 accounts — a few MB at most — so it
+  can't grow unbounded the way the deposit index can.
 - **`engine.rs`** — lazily folds the stream of validated `Entry` values into
-  a `Ledger` (a per-client map of running balances), consulting a
+  a caller-supplied `LedgerStore`, generic over both store traits
+  (`run_with_stores<D: DepositStore, L: LedgerStore>`), consulting the
   `DepositStore` to resolve dispute/resolve/chargeback rows against the
-  deposit they reference.
-- **`printer.rs`** — serializes the final `Ledger` to CSV.
-- **`main.rs`** — the CLI entry point (via `clap`); wires the above stages
-  together, bridging the reader's fallible per-row stream into the engine's
-  plain `Entry` stream without collecting into a `Vec`, and prints error
-  chains (`error: ...` / `  caused by: ...`) on failure.
+  deposit they reference and reading/writing balances through the
+  `LedgerStore`.
+- **`printer.rs`** — serializes a `LedgerStore` to CSV.
+- **`main.rs`** — the CLI entry point (via `clap`); wires `LiveDepositStore`
+  (disk-backed deposits) and `InMemoryLedger` (in-memory balances) into
+  `engine::run_with_stores`, bridges the reader's fallible per-row stream
+  into the engine's plain `Entry` stream without collecting into a `Vec`,
+  and prints error chains (`error: ...` / `  caused by: ...`) on failure —
+  including failure to initialize the deposit store itself.
 
-Validation errors (`ParseError`) and I/O/CSV errors (`ReaderError`) are kept
-in separate types (`src/error.rs`), both via `thiserror`, so the failure
-reason stays precise and each error's `#[source]` chain prints cleanly.
+Validation errors (`ParseError`) and top-level errors (`ReaderError`, which
+also wraps I/O/CSV failures, parse errors, and deposit-store initialization
+failures) are kept in separate types (`src/error.rs`), both via `thiserror`,
+so the failure reason stays precise and each error's `#[source]` chain
+prints cleanly.
 
 ## Development
 
@@ -132,17 +148,26 @@ human-readable sample only, distinct from the ~50k-row CSV that
 `cargo test`'s scale test generates on the fly to exercise the streaming
 path at scale.
 
+The compiled binary always uses `LiveDepositStore` + `InMemoryLedger` in
+production, so integration tests (including the scale test), which drive
+that binary, exercise the real disk-backed deposit path end-to-end.
+Unit tests, by contrast, mostly use the in-memory `InMemoryDepositStore` for
+speed and to keep the store swappable behind its trait — `store.rs` also has
+tests that run the same shared contract against `LiveDepositStore` directly.
+
 ## Known limitations / future work
 
-- **Memory footprint is O(#clients + #deposits), not O(#clients).** The
-  engine still never buffers the transaction log itself into a `Vec` — it
-  folds the input stream one row at a time — but it now retains every
-  *deposit* record (not withdrawals) for the lifetime of the run, since
-  `dispute`/`resolve`/`chargeback` fundamentally require looking up a past
-  deposit's amount and dispute state by `tx` id. This is a deliberate
-  trade-off, not an oversight.
-- **`DepositStore` is a trait for exactly this reason.** `InMemoryDepositStore`
-  is the only implementation today, but the trait boundary in `store.rs`
-  exists so a disk-backed implementation (e.g. `redb`, a pure-Rust embedded
-  B-tree) could be swapped in later — without changing `engine.rs` — to get
-  a truly bounded-memory pipeline. No disk-backed implementation exists yet.
+- **Deposits are retained on disk, not in memory.** `dispute`/`resolve`/
+  `chargeback` require looking up a deposit's amount and dispute state by
+  `tx` id, so *some* form of retention is required — that retention lives in
+  `LiveDepositStore` (see the `store.rs` bullet under Architecture).
+- **The per-client ledger stays in memory, on purpose** (see the `ledger.rs`
+  bullet under Architecture for the `u16` bound that makes this safe). A
+  disk-backed `LiveLedger` would add uniformity, not a real memory-safety
+  improvement, so none exists; the `LedgerStore` trait is shaped so one could
+  be added as a drop-in without touching `engine.rs`.
+- **What's actually in memory during a run:** one in-flight `Entry` at a time
+  (the input is streamed, never buffered into a `Vec`), the small in-memory
+  ledger described above, and whatever page cache `redb` itself keeps for the
+  deposit database. That's a bounded, modest footprint that doesn't grow with
+  the number of deposits — not literally zero memory usage, but bounded.
